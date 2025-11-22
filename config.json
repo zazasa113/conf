@@ -1,0 +1,9 @@
+{
+    "package_name": "express",
+    "repository_url": "https://github.com/expressjs/express",
+    "test_repo_mode": "remote",
+    "output_image": "dependencies.png",
+    "ascii_tree_output": true,
+    "max_depth": 1,
+    "filter_substring": ""
+  }

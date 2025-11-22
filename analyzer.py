@@ -1,166 +1,143 @@
 import json
-import argparse
+import urllib.request
+import urllib.error
+from typing import Dict, List, Any
 import sys
 import os
-from typing import Dict, Any
 
-class ConfigError(Exception):
-    """Базовое исключение для ошибок конфигурации"""
-    pass
-
-class ConfigValidationError(ConfigError):
-    """Ошибка валидации конфигурационных параметров"""
-    pass
-
-class ConfigFileError(ConfigError):
-    """Ошибка работы с файлом конфигурации"""
-    pass
-
-class DependencyAnalyzerConfig:
-    """Класс для работы с конфигурацией анализатора зависимостей"""
+class NPMAnalyzer:
+    """Анализатор зависимостей npm пакетов"""
     
-    # Значения по умолчанию
-    DEFAULT_CONFIG = {
-        "package_name": "",
-        "repository_url": "",
-        "test_repo_mode": "remote",
-        "output_image": "dependency_graph.png",
-        "ascii_tree_output": False,
-        "max_depth": 3,
-        "filter_substring": ""
-    }
+    NPM_REGISTRY_URL = "https://registry.npmjs.org"
     
-    VALID_TEST_MODES = {"remote", "local"}
+    def __init__(self, config):
+        self.config = config
     
-    def __init__(self, config_file: str = None):
-        self.config = self.DEFAULT_CONFIG.copy()
-        self.config_file = config_file
+    def get_package_info(self, package_name: str) -> Dict[str, Any]:
+        """Получение информации о пакете из npm registry"""
+        url = f"{self.NPM_REGISTRY_URL}/{package_name}"
         
-        if config_file:
-            self.load_config(config_file)
-    
-    def load_config(self, config_file: str) -> None:
-        """Загрузка конфигурации из JSON файла"""
         try:
-            if not os.path.exists(config_file):
-                raise ConfigFileError(f"Конфигурационный файл не найден: {config_file}")
-            
-            with open(config_file, 'r', encoding='utf-8') as f:
-                loaded_config = json.load(f)
-            
-            # Обновляем только существующие ключи
-            for key, value in loaded_config.items():
-                if key in self.DEFAULT_CONFIG:
-                    self.config[key] = value
-            
-            self.validate_config()
-            
-        except json.JSONDecodeError as e:
-            raise ConfigFileError(f"Ошибка парсинга JSON: {e}")
-        except PermissionError as e:
-            raise ConfigFileError(f"Нет прав доступа к файлу: {e}")
+            with urllib.request.urlopen(url) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    return data
+                else:
+                    raise Exception(f"HTTP {response.status}: {response.reason}")
+                    
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise Exception(f"Пакет '{package_name}' не найден в npm registry")
+            else:
+                raise Exception(f"Ошибка при запросе к npm registry: {e}")
+        except urllib.error.URLError as e:
+            raise Exception(f"Ошибка сети: {e}")
         except Exception as e:
-            raise ConfigFileError(f"Неизвестная ошибка при чтении файла: {e}")
+            raise Exception(f"Неизвестная ошибка: {e}")
     
-    def validate_config(self) -> None:
-        """Валидация конфигурационных параметров"""
-        errors = []
+    def extract_dependencies(self, package_info: Dict[str, Any]) -> Dict[str, str]:
+        """Извлечение прямых зависимостей из информации о пакете"""
+        dependencies = {}
         
-        # Проверка имени пакета
-        if not isinstance(self.config["package_name"], str):
-            errors.append("Имя пакета должно быть строкой")
+        # Получаем последнюю версию
+        latest_version = package_info.get('dist-tags', {}).get('latest')
+        if not latest_version:
+            # Если нет latest, берем первую доступную версию
+            versions = package_info.get('versions', {})
+            if versions:
+                latest_version = list(versions.keys())[-1]
+            else:
+                return dependencies
         
-        # Проверка URL репозитория/пути
-        if not isinstance(self.config["repository_url"], str):
-            errors.append("URL репозитория/путь должен быть строкой")
+        # Получаем информацию о конкретной версии
+        version_info = package_info.get('versions', {}).get(latest_version, {})
         
-        # Проверка режима работы
-        if self.config["test_repo_mode"] not in self.VALID_TEST_MODES:
-            errors.append(f"Неверный режим работы. Допустимые значения: {', '.join(self.VALID_TEST_MODES)}")
+        # Извлекаем зависимости
+        deps = version_info.get('dependencies', {})
+        dev_deps = version_info.get('devDependencies', {})
+        peer_deps = version_info.get('peerDependencies', {})
         
-        # Проверка имени файла изображения
-        if not isinstance(self.config["output_image"], str):
-            errors.append("Имя файла изображения должно быть строкой")
-        elif not self.config["output_image"].endswith(('.png', '.jpg', '.jpeg', '.svg')):
-            errors.append("Файл изображения должен иметь расширение .png, .jpg, .jpeg или .svg")
+        # Объединяем все зависимости
+        all_deps = {}
+        all_deps.update(deps)
+        all_deps.update(dev_deps)
+        all_deps.update(peer_deps)
         
-        # Проверка флага ASCII-дерева
-        if not isinstance(self.config["ascii_tree_output"], bool):
-            errors.append("Режим ASCII-дерева должен быть булевым значением")
-        
-        # Проверка максимальной глубины
-        if not isinstance(self.config["max_depth"], int):
-            errors.append("Максимальная глубина должна быть целым числом")
-        elif self.config["max_depth"] < 1:
-            errors.append("Максимальная глубина должна быть положительным числом")
-        
-        # Проверка подстроки фильтрации
-        if not isinstance(self.config["filter_substring"], str):
-            errors.append("Подстрока фильтрации должна быть строкой")
-        
-        if errors:
-            raise ConfigValidationError("; ".join(errors))
+        return all_deps
     
-    def get(self, key: str) -> Any:
-        """Получение значения параметра"""
-        return self.config.get(key)
-    
-    def display_config(self) -> None:
-        """Вывод всех параметров в формате ключ-значение"""
-        print("Текущая конфигурация:")
-        print("-" * 40)
-        for key, value in self.config.items():
-            print(f"{key}: {value}")
-        print("-" * 40)
-
-def create_sample_config() -> None:
-    """Создание примера конфигурационного файла"""
-    sample_config = {
-        "package_name": "requests",
-        "repository_url": "https://github.com/psf/requests",
-        "test_repo_mode": "remote",
-        "output_image": "requests_dependencies.png",
-        "ascii_tree_output": True,
-        "max_depth": 2,
-        "filter_substring": "http"
-    }
-    
-    with open('config_sample.json', 'w', encoding='utf-8') as f:
-        json.dump(sample_config, f, indent=2, ensure_ascii=False)
-    
-    print("Создан пример конфигурационного файла: config_sample.json")
+    def analyze_dependencies(self) -> Dict[str, str]:
+        """Основной метод анализа зависимостей"""
+        package_name = self.config.get('package_name')
+        
+        if not package_name:
+            raise Exception("Имя пакета не указано в конфигурации")
+        
+        print(f"Анализ зависимостей пакета: {package_name}")
+        print("=" * 50)
+        
+        # Получаем информацию о пакете
+        package_info = self.get_package_info(package_name)
+        
+        # Извлекаем зависимости
+        dependencies = self.extract_dependencies(package_info)
+        
+        return dependencies
 
 def main():
-    parser = argparse.ArgumentParser(description='Анализатор зависимостей пакетов')
-    parser.add_argument('--config', '-c', type=str, 
-                       help='Путь к конфигурационному файлу JSON')
-    parser.add_argument('--create-sample', action='store_true',
-                       help='Создать пример конфигурационного файла')
-    
-    args = parser.parse_args()
-    
-    if args.create_sample:
-        create_sample_config()
-        return
-    
+    """Основная функция приложения"""
+    # Загрузка конфигурации (упрощенная версия для этапа 2)
     try:
-        # Загрузка конфигурации
-        config = DependencyAnalyzerConfig(args.config)
+        if len(sys.argv) > 1:
+            config_file = sys.argv[1]
+        else:
+            config_file = 'config.json'
         
-        # Вывод всех параметров (требование этапа 1)
-        config.display_config()
-        
-        # Демонстрация получения отдельных параметров
-        print("\nДемонстрация доступа к параметрам:")
-        print(f"Анализируемый пакет: {config.get('package_name')}")
-        print(f"Режим работы: {config.get('test_repo_mode')}")
-        print(f"Максимальная глубина: {config.get('max_depth')}")
-        
-    except ConfigError as e:
-        print(f"Ошибка конфигурации: {e}", file=sys.stderr)
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            
+    except FileNotFoundError:
+        print(f"Ошибка: Конфигурационный файл '{config_file}' не найден")
+        print("Создайте config.json со следующим содержимым:")
+        print(json.dumps({
+            "package_name": "express",
+            "repository_url": "https://github.com/expressjs/express",
+            "test_repo_mode": "remote",
+            "output_image": "dependencies.png",
+            "ascii_tree_output": True,
+            "max_depth": 1,
+            "filter_substring": ""
+        }, indent=2))
         sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Ошибка в формате JSON: {e}")
+        sys.exit(1)
+    
+    # Вывод конфигурации (требование этапа 1)
+    print("Конфигурация анализатора:")
+    print("-" * 40)
+    for key, value in config.items():
+        print(f"{key}: {value}")
+    print("-" * 40)
+    print()
+    
+    # Анализ зависимостей
+    try:
+        analyzer = NPMAnalyzer(config)
+        dependencies = analyzer.analyze_dependencies()
+        
+        # Вывод прямых зависимостей (требование этапа 2)
+        if dependencies:
+            print("Прямые зависимости пакета:")
+            print("-" * 30)
+            for dep_name, dep_version in dependencies.items():
+                print(f" {dep_name}: {dep_version}")
+            
+            print(f"\nВсего найдено зависимостей: {len(dependencies)}")
+        else:
+            print("  Пакет не имеет зависимостей")
+            
     except Exception as e:
-        print(f"Неожиданная ошибка: {e}", file=sys.stderr)
+        print(f" Ошибка при анализе зависимостей: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
